@@ -3,7 +3,7 @@ local unpack = table.unpack or unpack
 local pack = table.pack or function(...) return {n=select("#", ...), ...} end
 
 function methods:call(...)
-	local resp = self:pcall(...)
+	local resp = self:redis_call(...)
 	local is_table = type(resp) == "table"
 	if is_table and resp.err then
 		error(resp.err, 2)
@@ -32,13 +32,13 @@ local function handle_ok_or_err(resp, lvl)
 end
 
 function methods:ping()
-	local resp = self:pcall("PING")
+	local resp = self:redis_call("PING")
 	return handle_ok_or_err(resp)
 end
 
 function methods:client_pause(delay)
 	local milliseconds = string.format("%d", math.ceil(delay*1000))
-	local resp = self:pcall("client", "pause", milliseconds)
+	local resp = self:redis_call("client", "pause", milliseconds)
 	return handle_ok_or_err(resp)
 end
 

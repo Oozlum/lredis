@@ -38,7 +38,7 @@ function methods:close()
 end
 
 -- call with table arg/return
-function methods:pcallt(arg, new_status, new_error, string_null, array_null)
+function methods:redis_callt(arg, new_status, new_error, string_null, array_null)
 	if self.subscribed_to > 0 or (self.subscribes_pending > 0 and not self.in_transaction) then
 		error("cannot 'call' while in subscribe mode")
 	end
@@ -61,15 +61,15 @@ function methods:pcallt(arg, new_status, new_error, string_null, array_null)
 end
 
 -- call in vararg style
-function methods:pcall(...)
-	return self:pcallt(pack(...), protocol.status_reply, protocol.error_reply, protocol.string_null, protocol.array_null)
+function methods:redis_call(...)
+	return self:redis_callt(pack(...), protocol.status_reply, protocol.error_reply, protocol.string_null, protocol.array_null)
 end
 
 -- need locking around sending subscribe, as you won't know
 function methods:start_subscription_modet(arg)
 	if self.in_transaction then -- in a transaction
 		-- read off "QUEUED"
-		local resp = self:pcallt(arg, protocol.status_reply, protocol.error_reply, protocol.string_null, protocol.array_null)
+		local resp = self:redis_callt(arg, protocol.status_reply, protocol.error_reply, protocol.string_null, protocol.array_null)
 		assert(type(resp) == "table" and resp.ok == "QUEUED")
 	else
 		local req = protocol.encode_request(arg)
