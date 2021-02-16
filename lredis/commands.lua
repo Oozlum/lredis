@@ -15,19 +15,15 @@ local new_transaction
 --]]
 
 function base_methods:call_no_err(...)
-  local resp = self:pcall(...)
-  if type(resp) ~= "table" or (not resp.ok and not resp.err) then
-    resp = { data = resp }
-  end
-  return resp
+  return self:pcall(...)
 end
 
 function base_methods:call(...)
-  local resp = self:call_no_err(...)
-  if resp.err then
-    error(resp.err, 2)
+  local resp, err = self:call_no_err(...)
+  if err or resp.type == protocol.ERROR then
+    error(resp.data, 2)
   end
-  return (resp.ok and resp) or resp.data
+  return resp
 end
 
 function base_methods:call_ok_or_err(lvl, ...)
@@ -36,7 +32,8 @@ function base_methods:call_ok_or_err(lvl, ...)
   if lvl ~= 0 then
     lvl = (lvl or 1) + 1
   end
-  return resp.ok or error(resp.err or "unexpected response format", lvl)
+
+  return (resp.type == protocol.STATUS and resp) or error(resp.data or "unexpected response format", lvl)
 end
 
 function base_methods:ping()
@@ -110,14 +107,14 @@ function transaction_methods:call(func, ...)
 
   local resp = self:call_no_err(func, ...)
   func = func:upper()
-  if func == "EXEC" or func == "DISCARD" or resp.err then
+  if func == "EXEC" or func == "DISCARD" or resp.type == protocol.ERROR then
     self:end_transaction()
   end
 
-  if resp.err then
-    error(resp.err, 2)
+  if resp.type == protocol.ERROR then
+    error(resp.data, 2)
   end
-  return (resp.ok and resp) or resp.data
+  return resp
 end
 
 function transaction_methods:exec()

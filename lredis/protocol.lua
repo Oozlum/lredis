@@ -1,4 +1,11 @@
 -- Documentation on the redis protocol found at http://redis.io/topics/protocol
+local data_types = {
+  STATUS = 'STATUS',
+  ERROR = 'ERROR',
+  INT = 'INT',
+  STRING = 'STRING',
+  ARRAY = 'ARRAY',
+}
 
 -- Encode and send a redis command.
 local function send_command(file, arg)
@@ -30,7 +37,7 @@ local function send_command(file, arg)
 end
 
 -- Parse a redis response
-local function read_response(file, new_status, new_error, string_null, array_null)
+local function read_response(file)
   local line, err_code = file:read("*L")
   if not line then
     return nil, err_code or "EOF reached"
@@ -45,65 +52,43 @@ local function read_response(file, new_status, new_error, string_null, array_nul
   end
 
   if data_type == "+" then
-    return new_status(data)
+    return { type = data_types.STATUS, data = data }
   elseif data_type == "-" then
-    return new_error(data)
+    return { type = data_types.ERROR, data = data }
   elseif data_type == ":" and int_data then
-    return int_data
-  elseif data_type == "$" and int_data then
-    if int_data == -1 then
-      return string_null
-    elseif int_data > 512*1024*1024 then -- max 512 MB
-      return nil, "bulk string too large"
-    else
-      local str, err_code = file:read(int_data)
-      if not str then
-        return str, err_code
-      end
-      -- should be followed by CRLF
-      local crlf, err_code = file:read(2)
-      if not crlf or crlf ~= "\r\n" then
-        return nil, err_code or "invalid bulk reply"
-      end
-      return str
+    return { type = data_types.INT, data = int_data }
+  elseif data_type == "$" and int_data == -1 then
+    return { type = data_types.STRING }
+  elseif data_type == "$" and int_data >= 0 and int_data <= 512*1024*1024 then
+    line, err_code = file:read(int_data + 2)
+    if not line then
+      return nil, err_code
     end
-  elseif data_type == "*" and int_data then
-    if int_data == -1 then
-      return array_null
-    else
-      local arr, null = {}, {}
-      for i=1, int_data do
-        local resp, err_code = read_response(file, new_status, new_error, null, array_null)
-        if not resp then
-          return nil, err_code
-        end
-        arr[i] = (resp ~= null) and resp or string_null
-      end
-      return arr
+    data, ending = line:sub(1, -2), line:sub(-2)
+    if ending ~= "\r\n" then
+      return nil, err_code or "invalid bulk reply"
     end
-  else
-    return nil, "protocol error"
+    return { type = data_types.STRING, data = data }
+  elseif data_type == "*" and int_data == -1 then
+    return { type = data_types.ARRAY }
+  elseif data_type == "*" and int_data >= 0 then
+    local array = { type = data_types.ARRAY, data = {} }
+    for i = 1, int_data do
+      array.data[i], err_code = read_response(file)
+      if not array.data[i] then
+        return nil, err_code
+      end
+    end
+    return array
   end
+
+  return nil, "protocol error"
 end
 
--- The way lua embedded into redis encodes things:
-local function error_reply(message)
-  return {err = message}
-end
-local function status_reply(message)
-  return {ok = message}
-end
-local function default_read_response(file)
-  return read_response(file, status_reply, error_reply, false, false)
-end
-
-return {
-  send_command = send_command;
-  read_response = read_response;
-
-  error_reply = error_reply;
-  status_reply = status_reply;
-  string_null = false;
-  array_null = false;
-  default_read_response = default_read_response;
-}
+return setmetatable({
+  send_command = send_command,
+  read_response = read_response,
+},
+{
+  __index = data_types
+})
