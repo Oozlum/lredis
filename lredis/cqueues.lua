@@ -3,7 +3,6 @@ local commands = require "lredis.commands"
 local cq = require "cqueues"
 local cs = require "cqueues.socket"
 local cc = require "cqueues.condition"
-local new_fifo = require "fifo"
 
 local pack = table.pack or function(...) return {n = select("#", ...), ...} end
 
@@ -21,7 +20,7 @@ local function new(socket)
 	socket:setvbuf("full", math.huge) -- 'infinite' buffering; no write locks needed
 	return commands.new_client{
 		socket = socket;
-		fifo = new_fifo();
+		fifo = {};
 		subscribes_pending = 0;
 		subscribed_to = 0;
 	}
@@ -55,19 +54,18 @@ function methods:pcallt(arg, new_status, new_error, string_null, array_null)
 	if not ok then
 		error(('send_command error: %s'):format(tostring(err_code)))
 	end
-	self.fifo:push(cond)
-	if self.fifo:peek() ~= cond then
+  table.insert(self.fifo, cond)
+	if self.fifo[1] ~= cond then
 		cond:wait()
 	end
 	-- catch any error reading the response and re-throw it after removing this
 	-- call from the queue, to avoid deadlocking other requests.
 	local null = {}
 	local resp, err_code = protocol.read_response(self.socket, new_status, new_error, null, array_null)
-	assert(self.fifo:pop() == cond)
+	assert(table.remove(self.fifo, 1) == cond)
 	-- signal next thing in pipeline
-	local next, ok = self.fifo:peek()
-	if ok then
-		next:signal()
+  if self.fifo[1] then
+		self.fifo[1]:signal()
 	end
 	assert(resp, err_code)
 	return (resp ~= null) and resp or string_null

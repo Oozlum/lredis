@@ -53,7 +53,6 @@ This will automatically install run-time lua dependencies for you.
 ## Dependencies
 
   - [cqueues](http://25thandclement.com/~william/projects/cqueues.html) >= 20150907
-  - [fifo](https://github.com/daurnimator/fifo.lua)
 
 ### For running tests
 
