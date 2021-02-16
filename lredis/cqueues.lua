@@ -11,123 +11,123 @@ local methods = commands.base_methods
 -- override the default socket handler so that it returns all errors rather than
 -- throwing them.
 local function socket_error_handler(socket, method, code, level)
-	return code, level
+  return code, level
 end
 
 local function new(socket)
-	socket:onerror(socket_error_handler)
-	socket:setmode("b", "b")
-	socket:setvbuf("full", math.huge) -- 'infinite' buffering; no write locks needed
-	return commands.new_client{
-		socket = socket;
-		fifo = {};
-		subscribes_pending = 0;
-		subscribed_to = 0;
-	}
+  socket:onerror(socket_error_handler)
+  socket:setmode("b", "b")
+  socket:setvbuf("full", math.huge) -- 'infinite' buffering; no write locks needed
+  return commands.new_client{
+    socket = socket;
+    fifo = {};
+    subscribes_pending = 0;
+    subscribed_to = 0;
+  }
 end
 
 local function connect_tcp(host, port)
-	local socket = assert(cs.connect({
-		host = host or "127.0.0.1";
-		port = port or "6379";
-		nodelay = true;
-	}))
-	assert(socket:connect())
-	return new(socket)
+  local socket = assert(cs.connect({
+    host = host or "127.0.0.1";
+    port = port or "6379";
+    nodelay = true;
+  }))
+  assert(socket:connect())
+  return new(socket)
 end
 
 function methods:in_coroutine()
-	return cq.running() and true or false
+  return cq.running() and true or false
 end
 
 function methods:close()
-	self.socket:close()
+  self.socket:close()
 end
 
 -- call with table arg/return
 function methods:pcallt(arg, new_status, new_error, string_null, array_null)
-	if self.subscribed_to > 0 or (self.subscribes_pending > 0 and not self.in_transaction) then
-		error("cannot 'call' while in subscribe mode")
-	end
-	local cond = cc.new()
-	local ok, err_code = protocol.send_command(self.socket, arg)
-	if not ok then
-		error(('send_command error: %s'):format(tostring(err_code)))
-	end
+  if self.subscribed_to > 0 or (self.subscribes_pending > 0 and not self.in_transaction) then
+    error("cannot 'call' while in subscribe mode")
+  end
+  local cond = cc.new()
+  local ok, err_code = protocol.send_command(self.socket, arg)
+  if not ok then
+    error(('send_command error: %s'):format(tostring(err_code)))
+  end
   table.insert(self.fifo, cond)
-	if self.fifo[1] ~= cond then
-		cond:wait()
-	end
-	-- catch any error reading the response and re-throw it after removing this
-	-- call from the queue, to avoid deadlocking other requests.
-	local null = {}
-	local resp, err_code = protocol.read_response(self.socket, new_status, new_error, null, array_null)
-	assert(table.remove(self.fifo, 1) == cond)
-	-- signal next thing in pipeline
+  if self.fifo[1] ~= cond then
+    cond:wait()
+  end
+  -- catch any error reading the response and re-throw it after removing this
+  -- call from the queue, to avoid deadlocking other requests.
+  local null = {}
+  local resp, err_code = protocol.read_response(self.socket, new_status, new_error, null, array_null)
+  assert(table.remove(self.fifo, 1) == cond)
+  -- signal next thing in pipeline
   if self.fifo[1] then
-		self.fifo[1]:signal()
-	end
-	assert(resp, err_code)
-	return (resp ~= null) and resp or string_null
+    self.fifo[1]:signal()
+  end
+  assert(resp, err_code)
+  return (resp ~= null) and resp or string_null
 end
 
 -- call in vararg style
 function methods:pcall(...)
-	return self:pcallt(pack(...), protocol.status_reply, protocol.error_reply, protocol.string_null, protocol.array_null)
+  return self:pcallt(pack(...), protocol.status_reply, protocol.error_reply, protocol.string_null, protocol.array_null)
 end
 
 -- need locking around sending subscribe, as you won't know
 function methods:start_subscription_modet(arg)
-	if self.in_transaction then -- in a transaction
-		-- read off "QUEUED"
-		local resp = self:pcallt(arg, protocol.status_reply, protocol.error_reply, protocol.string_null, protocol.array_null)
-		assert(type(resp) == "table" and resp.ok == "QUEUED")
-	else
-		local ok, err_code = protocol.send_command(self.socket, arg)
-		if not ok then
-			error(('send_command error: %s'):format(tostring(err_code)))
-		end
-	end
-	self.subscribes_pending = self.subscribes_pending + 1
+  if self.in_transaction then -- in a transaction
+    -- read off "QUEUED"
+    local resp = self:pcallt(arg, protocol.status_reply, protocol.error_reply, protocol.string_null, protocol.array_null)
+    assert(type(resp) == "table" and resp.ok == "QUEUED")
+  else
+    local ok, err_code = protocol.send_command(self.socket, arg)
+    if not ok then
+      error(('send_command error: %s'):format(tostring(err_code)))
+    end
+  end
+  self.subscribes_pending = self.subscribes_pending + 1
 end
 
 function methods:start_subscription_mode(...)
-	return self:start_subscription_modet(pack(...))
+  return self:start_subscription_modet(pack(...))
 end
 
 function methods:get_next(new_status, new_error, string_null, array_null)
-	if self.in_transaction or (self.subscribed_to == 0 and self.subscribes_pending == 0) then
-		return nil, "not in subscribe mode"
-	end
-	local null = {}
-	local resp, err_code = protocol.read_response(self.socket, new_status, new_error, null, array_null)
-	assert(resp, err_code)
-	resp = (resp ~= null) and resp or string_null
-	local kind = resp[1]
-	if kind == "subscribe" or kind == "unsubscribe" or kind == "psubscribe" or kind == "punsubscribe" then
-		self.subscribed_to = resp[3]
-		self.subscribes_pending = self.subscribes_pending - 1
-	end
-	return resp
+  if self.in_transaction or (self.subscribed_to == 0 and self.subscribes_pending == 0) then
+    return nil, "not in subscribe mode"
+  end
+  local null = {}
+  local resp, err_code = protocol.read_response(self.socket, new_status, new_error, null, array_null)
+  assert(resp, err_code)
+  resp = (resp ~= null) and resp or string_null
+  local kind = resp[1]
+  if kind == "subscribe" or kind == "unsubscribe" or kind == "psubscribe" or kind == "punsubscribe" then
+    self.subscribed_to = resp[3]
+    self.subscribes_pending = self.subscribes_pending - 1
+  end
+  return resp
 end
 
 function methods:create_transaction_lock()
-	if not self.transaction_lock then
-		self.transaction_lock = cc.new()
-	end
+  if not self.transaction_lock then
+    self.transaction_lock = cc.new()
+  end
 end
 
 -- destroy the transaction lock and signal all waiting processes.
 function methods:destroy_transaction_lock()
-	local lock = self.transaction_lock
-	self.transaction_lock = nil
+  local lock = self.transaction_lock
+  self.transaction_lock = nil
 
-	if lock then
-		lock:signal()
-	end
+  if lock then
+    lock:signal()
+  end
 end
 
 return {
-	new = new;
-	connect_tcp = connect_tcp;
+  new = new;
+  connect_tcp = connect_tcp;
 }
