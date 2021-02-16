@@ -1,56 +1,28 @@
 -- Documentation on the redis protocol found at http://redis.io/topics/protocol
 
-
--- Encode a redis bulk string
-local function encode_bulk_string(str)
-	assert(type(str) == "string")
-	return string.format("$%d\r\n%s\r\n", #str, str)
-end
-
--- Encode a redis request
--- Requests are always just an array of bulk strings
-local function encode_request(arg)
+-- Encode and send a redis command.
+local function send_command(file, arg)
 	local n = arg.n or #arg
 	if n == 0 then
 		return nil, "need at least one argument"
 	end
 
-	local str = {
+  -- convert the argument array into a RESP array of bulk strings.
+	local str_arg = {
 		[0] = string.format("*%d\r\n", n);
 	}
 	for i=1, n do
-		str[i] = encode_bulk_string(arg[i])
+	  str_arg[i] = string.format("$%d\r\n%s\r\n", #arg[i], arg[i])
 	end
-	return table.concat(str, nil, 0, n)
-end
+	str_arg = table.concat(str_arg, nil, 0, n)
 
--- Encode a redis inline command
--- space separated
-local function encode_inline(arg)
-	local n = arg.n or #arg
-	assert(n > 0, "need at least one argument")
-	-- inline commands can't start with "*"
-	assert(arg[1]:sub(1,1) ~= "*", "invalid command for inline command")
-	-- ensure the arguments do not contain a space character or newline
-	for i=1, n do
-		assert(arg[i]:match("^[^\r\n ]*$"), "invalid string for inline command")
-	end
-	arg[n+1] = "\r\n"
-	return table.concat(arg, " ", 1, n+1)
-end
-
--- Encode and send a redis command.
-local function send_command(file, arg)
-	local req, err_code = encode_request(arg)
-	if not req then
+  -- send the string to the server.
+	local ok, err_code = file:write(str_arg)
+	if not ok then
 		return nil, err_code
 	end
-	req, err_code = file:write(req)
-	if not req then
-		return nil, err_code
-	end
-	req, err_code = file:flush()
-	if not req then
+	ok, err_code = file:flush()
+	if not ok then
 		return nil, err_code
 	end
 
@@ -59,56 +31,48 @@ end
 
 -- Parse a redis response
 local function read_response(file, new_status, new_error, string_null, array_null)
-	local line, err_code = file:read("*l")
+	local line, err_code = file:read("*L")
 	if not line then
 		return nil, err_code or "EOF reached"
-	elseif line:sub(-1, -1) ~= "\r" then
+  end
+
+  -- split the string into its component parts and validate.
+  local data_type, data, ending = line:sub(1, 1), line:sub(2, -2), line:sub(-2)
+  local int_data = tonumber(data, 10)
+
+	if ending ~= "\r\n" then
 		return nil, "invalid line ending"
 	end
 
-	local status, data = line:sub(1, 1), line:sub(2, -2)
-	if status == "+" then
+	if data_type == "+" then
 		return new_status(data)
-	elseif status == "-" then
+	elseif data_type == "-" then
 		return new_error(data)
-	elseif status == ":" then
-		local n = tonumber(data, 10)
-		if n then
-			return n
-		else
-			return nil, "invalid integer"
-		end
-	elseif status == "$" then
-		local len = tonumber(data, 10)
-		if not len then
-			return nil, "invalid bulk string length"
-		elseif len == -1 then
+	elseif data_type == ":" and int_data then
+		return int_data
+	elseif data_type == "$" and int_data then
+		if int_data == -1 then
 			return string_null
-		elseif len > 512*1024*1024 then -- max 512 MB
+		elseif int_data > 512*1024*1024 then -- max 512 MB
 			return nil, "bulk string too large"
 		else
-			local str, err_code = file:read(len)
+			local str, err_code = file:read(int_data)
 			if not str then
 				return str, err_code
 			end
 			-- should be followed by CRLF
 			local crlf, err_code = file:read(2)
-			if not crlf then
-				return nil, err_code
-			elseif crlf ~= "\r\n" then
-				return nil, "invalid bulk reply"
+			if not crlf or crlf ~= "\r\n" then
+				return nil, err_code or "invalid bulk reply"
 			end
 			return str
 		end
-	elseif status == "*" then
-		local len = tonumber(data, 10)
-		if not len then
-			return nil, "invalid array length"
-		elseif len == -1 then
+	elseif data_type == "*" and int_data then
+		if int_data == -1 then
 			return array_null
 		else
 			local arr, null = {}, {}
-			for i=1, len do
+			for i=1, int_data do
 				local resp, err_code = read_response(file, new_status, new_error, null, array_null)
 				if not resp then
 					return nil, err_code
@@ -118,7 +82,7 @@ local function read_response(file, new_status, new_error, string_null, array_nul
 			return arr
 		end
 	else
-		return nil, "invalid redis status"
+		return nil, "protocol error"
 	end
 end
 
@@ -129,23 +93,17 @@ end
 local function status_reply(message)
 	return {ok = message}
 end
-local string_null = false
-local array_null = false
 local function default_read_response(file)
-	return read_response(file, status_reply, error_reply, string_null, array_null)
+	return read_response(file, status_reply, error_reply, false, false)
 end
 
 return {
-	encode_bulk_string = encode_bulk_string;
-	encode_request = encode_request;
-	encode_inline = encode_inline;
-
 	send_command = send_command;
 	read_response = read_response;
 
 	error_reply = error_reply;
 	status_reply = status_reply;
-	string_null = string_null;
-	array_null = array_null;
+	string_null = false;
+	array_null = false;
 	default_read_response = default_read_response;
 }

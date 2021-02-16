@@ -7,13 +7,6 @@ describe("lredis.protocol module", function()
 		assert(file:seek("set"))
 		return file
 	end
-	-- Docs at http://redis.io/topics/protocol
-	it("composes example from docs", function()
-		-- From "Sending commands to a Redis Server" section
-		assert.same("*2\r\n$4\r\nLLEN\r\n$6\r\nmylist\r\n",
-			protocol.encode_request{"LLEN", "mylist"})
-
-	end)
 	it("can parse examples from docs", function()
 		--- From "RESP Arrays" section
 		-- Empty array
