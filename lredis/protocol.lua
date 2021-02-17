@@ -9,28 +9,28 @@ local data_types = {
 
 -- Encode and send a redis command.
 local function send_command(file, arg)
-  local n = arg.n or #arg
-  if n == 0 then
-    return nil, "need at least one argument"
+  if #arg == 0 then
+    return nil, 'USAGE', 'No arguments given'
   end
 
   -- convert the argument array into a RESP array of bulk strings.
   local str_arg = {
-    [0] = string.format("*%d\r\n", n);
+    ('*%d\r\n'):format(#arg)
   }
-  for i=1, n do
-    str_arg[i] = string.format("$%d\r\n%s\r\n", #arg[i], arg[i])
+  for _,v in ipairs(arg) do
+    v = tostring(v)
+    table.insert(str_arg, ('$%d\r\n%s\r\n'):format(#v, v))
   end
-  str_arg = table.concat(str_arg, nil, 0, n)
+  str_arg = table.concat(str_arg)
 
   -- send the string to the server.
-  local ok, err_code = file:write(str_arg)
+  local ok, err_type, err_msg = file:write(str_arg)
   if not ok then
-    return nil, err_code
+    return nil, err_type, err_msg
   end
-  ok, err_code = file:flush()
+  ok, err_type, err_msg = file:flush()
   if not ok then
-    return nil, err_code
+    return nil, err_type, err_msg
   end
 
   return true
@@ -38,51 +38,51 @@ end
 
 -- Parse a redis response
 local function read_response(file)
-  local line, err_code = file:read("*L")
+  local line, err_type, err_msg = file:read('*L')
   if not line then
-    return nil, err_code or "EOF reached"
+    return nil, err_type, err_msg
   end
 
   -- split the string into its component parts and validate.
   local data_type, data, ending = line:sub(1, 1), line:sub(2, -2), line:sub(-2)
   local int_data = tonumber(data, 10)
 
-  if ending ~= "\r\n" then
-    return nil, "invalid line ending"
+  if ending ~= '\r\n' then
+    return nil, 'PROTOCOL', 'invalid line ending'
   end
 
-  if data_type == "+" then
+  if data_type == '+' then
     return { type = data_types.STATUS, data = data }
-  elseif data_type == "-" then
+  elseif data_type == '-' then
     return { type = data_types.ERROR, data = data }
-  elseif data_type == ":" and int_data then
+  elseif data_type == ':' and int_data then
     return { type = data_types.INT, data = int_data }
-  elseif data_type == "$" and int_data == -1 then
+  elseif data_type == '$' and int_data == -1 then
     return { type = data_types.STRING }
-  elseif data_type == "$" and int_data >= 0 and int_data <= 512*1024*1024 then
-    line, err_code = file:read(int_data + 2)
+  elseif data_type == '$' and int_data >= 0 and int_data <= 512*1024*1024 then
+    line, err_type, err_msg = file:read(int_data + 2)
     if not line then
-      return nil, err_code
+      return nil, err_type, err_msg
     end
     data, ending = line:sub(1, -2), line:sub(-2)
-    if ending ~= "\r\n" then
-      return nil, err_code or "invalid bulk reply"
+    if ending ~= '\r\n' then
+      return nil, 'PROTOCOL', 'invalid line ending'
     end
     return { type = data_types.STRING, data = data }
-  elseif data_type == "*" and int_data == -1 then
+  elseif data_type == '*' and int_data == -1 then
     return { type = data_types.ARRAY }
-  elseif data_type == "*" and int_data >= 0 then
+  elseif data_type == '*' and int_data >= 0 then
     local array = { type = data_types.ARRAY, data = {} }
     for i = 1, int_data do
-      array.data[i], err_code = read_response(file)
+      array.data[i], err_type, err_msg = read_response(file)
       if not array.data[i] then
-        return nil, err_code
+        return nil, err_type, err_msg
       end
     end
     return array
   end
 
-  return nil, "protocol error"
+  return nil, 'PROTOCOL', 'invalid response'
 end
 
 return setmetatable({
