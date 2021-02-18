@@ -1,18 +1,12 @@
 local protocol = require 'lredis.protocol'
-local command = require 'lredis.command'
 local util = require 'lredis.util'
-local cq = require 'cqueues'
 local cs = require 'cqueues.socket'
 local cc = require 'cqueues.condition'
 
 --[[ Base client functions --]]
 
-local function in_coroutine()
-  return cq.running() and true or false
-end
-
 local function close_client(client)
-  client.attr.socket:close()
+  client.socket:close()
 end
 
 -- if a whitelist is given, only accept commands in the whitelist.
@@ -46,19 +40,19 @@ local function redis_pcall(client, ...)
   end
 
   local cond = cc.new()
-  local ok, err_type, err_msg = protocol.send_command(client.attr.socket, args)
+  local ok, err_type, err_msg = protocol.send_command(client.socket, args)
   if not ok then
     return nil, err_type, err_msg
   end
-  table.insert(client.attr.fifo, cond)
-  if client.attr.fifo[1] ~= cond then
+  table.insert(client.fifo, cond)
+  if client.fifo[1] ~= cond then
     cond:wait()
   end
   -- read the response, signal the next command in the queue and then deal with errors.
-  local resp, err_type, err_msg = protocol.read_response(client.attr.socket, options.response_formatter or client.attr.response_formatter)
-  table.remove(client.attr.fifo, 1)
-  if client.attr.fifo[1] then
-    client.attr.fifo[1]:signal()
+  local resp, err_type, err_msg = protocol.read_response(client.socket, options.response_formatter or client.response_formatter)
+  table.remove(client.fifo, 1)
+  if client.fifo[1] then
+    client.fifo[1]:signal()
   end
   if not resp then return nil, err_type, err_msg end
 
@@ -69,7 +63,7 @@ end
 -- call the registered error handler on error and return the results.
 local function redis_call(client, ...)
   local options, args = util.transform_variadic_args_to_tables(...)
-  options.error_handler = options.error_handler or client.attr.error_handler
+  options.error_handler = options.error_handler or client.error_handler
 
   local resp, err_type, err_msg = client:pcall(options, args)
   if not resp then
@@ -77,16 +71,6 @@ local function redis_call(client, ...)
   end
 
   return resp
-end
-
-local function new_client(client)
-  return {
-    attr = client,
-    close = close_client,
-    in_coroutine = in_coroutine,
-    pcall = redis_pcall,
-    call = redis_call,
-  }
 end
 
 --[[ Static module functions --]]
@@ -103,11 +87,14 @@ local function new(socket, error_handler)
   socket:onerror(socket_error_handler)
   socket:setmode('b', 'b')
   socket:setvbuf('full', math.huge) -- 'infinite' buffering; no write locks needed
-  return command.new_handler(new_client{
+  return {
     socket = socket,
     error_handler = error_handler or M.error_handler,
     fifo = {},
-  })
+    close = close_client,
+    pcall = redis_pcall,
+    call = redis_call
+  }
 end
 
 local function connect_tcp(host, port, error_handler)
@@ -153,22 +140,6 @@ end
 
 function start_subscription_mode(...)
   return self:start_subscription_modet(pack(...))
-end
-
-function create_transaction_lock()
-  if not self.transaction_lock then
-    self.transaction_lock = cc.new()
-  end
-end
-
--- destroy the transaction lock and signal all waiting processes.
-function destroy_transaction_lock()
-  local lock = self.transaction_lock
-  self.transaction_lock = nil
-
-  if lock then
-    lock:signal()
-  end
 end
 
 return M
