@@ -37,7 +37,11 @@ local function send_command(file, arg)
 end
 
 -- Parse a redis response
-local function read_response(file)
+local function read_response(file, response_formatter)
+  response_formatter = response_formatter or function(resp)
+    return resp
+  end
+
   local line, err_type, err_msg = file:read('*L')
   if not line then
     return nil, err_type, err_msg
@@ -52,13 +56,13 @@ local function read_response(file)
   end
 
   if data_type == '+' then
-    return { type = data_types.STATUS, data = data }
+    return response_formatter{ type = data_types.STATUS, data = data }
   elseif data_type == '-' then
-    return { type = data_types.ERROR, data = data }
+    return response_formatter{ type = data_types.ERROR, data = data }
   elseif data_type == ':' and int_data then
-    return { type = data_types.INT, data = int_data }
+    return response_formatter{ type = data_types.INT, data = int_data }
   elseif data_type == '$' and int_data == -1 then
-    return { type = data_types.STRING }
+    return response_formatter{ type = data_types.STRING }
   elseif data_type == '$' and int_data >= 0 and int_data <= 512*1024*1024 then
     line, err_type, err_msg = file:read(int_data + 2)
     if not line then
@@ -68,13 +72,13 @@ local function read_response(file)
     if ending ~= '\r\n' then
       return nil, 'PROTOCOL', 'invalid line ending'
     end
-    return { type = data_types.STRING, data = data }
+    return response_formatter{ type = data_types.STRING, data = data }
   elseif data_type == '*' and int_data == -1 then
-    return { type = data_types.ARRAY }
+    return response_formatter{ type = data_types.ARRAY }
   elseif data_type == '*' and int_data >= 0 then
     local array = { type = data_types.ARRAY, data = {} }
     for i = 1, int_data do
-      array.data[i], err_type, err_msg = read_response(file)
+      array.data[i], err_type, err_msg = read_response(file, response_formatter)
       if not array.data[i] then
         return nil, err_type, err_msg
       end

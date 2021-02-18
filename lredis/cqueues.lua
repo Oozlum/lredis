@@ -55,7 +55,7 @@ local function redis_pcall(client, ...)
     cond:wait()
   end
   -- read the response, signal the next command in the queue and then deal with errors.
-  local resp, err_type, err_msg = protocol.read_response(client.attr.socket)
+  local resp, err_type, err_msg = protocol.read_response(client.attr.socket, options.response_formatter or client.attr.response_formatter)
   table.remove(client.attr.fifo, 1)
   if client.attr.fifo[1] then
     client.attr.fifo[1]:signal()
