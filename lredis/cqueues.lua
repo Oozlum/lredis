@@ -96,7 +96,7 @@ local M = {}
 -- override the default socket handler so that it returns all errors rather than
 -- throwing them.
 local function socket_error_handler(socket, method, code, level)
-  return 'SOCKET', tostring(code or 'EOF'), level
+  return 'SOCKET', ('%s in %s'):format(tostring(code or 'EOF'), method), level
 end
 
 local function new(socket, error_handler)
@@ -113,15 +113,20 @@ end
 local function connect_tcp(host, port, error_handler)
   error_handler = error_handler or M.error_handler
 
-  local socket, err = cs.connect({
+  -- override the global CQueues error handler briefly, until we have a socket.
+  local old_error_handler = cs.onerror(socket_error_handler)
+  local socket, err_type, err_msg = cs.connect({
     host = host or '127.0.0.1',
     port = port or '6379',
     nodelay = true,
   })
-  if not socket then return error_handler(err) end
+  cs.onerror(old_error_handler)
 
-  local ok, err = socket:connect()
-  if not ok then return error_handler(err) end
+  if not socket then return error_handler(err_type, err_msg) end
+
+  socket:onerror(socket_error_handler)
+  local ok, err_type, err_msg = socket:connect()
+  if not ok then return error_handler(err_type, err_msg) end
 
   return new(socket, error_handler)
 end
