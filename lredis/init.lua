@@ -86,20 +86,19 @@ local function new_handler(redis_client, handler_spec)
   }
 
   return setmetatable(handler, {
-    __index = function(t, k)
+    __index = function(t, cmd)
       -- ignore non-string keys, otherwise ipairs will go loopy.
-      if type(k) ~= 'string' then
+      if type(cmd) ~= 'string' then
         return nil
       end
 
-      if not cache[k] then
-        cache[k] = function(handler, ...)
-          local options, args = util.transform_variadic_args_to_tables(...)
-          table.insert(args, 1, k)
+      if not cache[cmd] then
+        cache[cmd] = function(handler, ...)
+          local options, args = util.transform_variadic_args_to_tables(cmd, ...)
           return handler:call(options, args)
         end
       end
-      return cache[k]
+      return cache[cmd]
     end
   })
 end

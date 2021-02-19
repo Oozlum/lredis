@@ -3,24 +3,28 @@
 -- transform a variadic argument list into a two-table argument list as follows:
 -- () => ({},{})
 -- ({a}) => ({a},{})
--- (x,y,z,...) => ({},{x,y,z,...})
 -- ({a},x,y,z,...) => ({a},{x,y,z,...})
 -- ({a},{b},...) => ({a},{b})
+-- (x,y,z,...) => ({},{x,y,z,...})
+-- (x,{a},...) => ({a},{x,...})
+-- (x,{a},{y,z},...) => ({a},{x,y,z})
 local function transform_variadic_args_to_tables(...)
-  local options
+  local first_arg, options
   local args = {...}
+  if type(args[1]) ~= 'table' then
+    first_arg = table.remove(args, 1)
+  end
   if type(args[1]) == 'table' then
     options = table.remove(args, 1)
   end
   if type(args[1]) == 'table' then
     args = args[1]
   end
-  if #args == 0 then
-    args = options
-    options = nil
-  end
   options = options or {}
   args = args or {}
+  if first_arg then
+    table.insert(args, 1, first_arg)
+  end
 
   return options, args
 end
