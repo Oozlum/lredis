@@ -1,7 +1,9 @@
 local protocol = require 'lredis.protocol'
 local util = require 'lredis.util'
-local cs = require 'cqueues.socket'
-local cc = require 'cqueues.condition'
+local cqueues = require'cqueues'
+cqueues.socket = require'cqueues.socket'
+cqueues.condition = require'cqueues.condition'
+cqueues.errno = require'cqueues.errno'
 
 --[[ Base client functions --]]
 
@@ -46,7 +48,7 @@ local function redis_pcall(client, ...)
     return nil, 'USAGE', 'invalid socket'
   end
 
-  local cond = cc.new()
+  local cond = cqueues.condition.new()
   local ok, err_type, err_msg = protocol.send_command(client.socket, args)
   if not ok then
     return nil, err_type, err_msg
@@ -56,7 +58,7 @@ local function redis_pcall(client, ...)
     cond:wait()
   end
   -- read the response, signal the next command in the queue and then deal with errors.
-  local resp, err_type, err_msg = protocol.read_response(client.socket, options.response_formatter or client.response_formatter)
+  local resp, err_type, err_msg = protocol.read_response(client.socket, options.response_creator or client.response_creator)
   table.remove(client.fifo, 1)
   if client.fifo[1] then
     client.fifo[1]:signal()
@@ -87,7 +89,7 @@ local M = {}
 -- override the default socket handler so that it returns all errors rather than
 -- throwing them.
 local function socket_error_handler(socket, method, code, level)
-  return 'SOCKET', ('%s in %s'):format(tostring(code or 'EOF'), method), level
+  return 'SOCKET', ('%s %s'):format(cqueues.errno[code] or '', cqueues.errno.strerror(code)), level
 end
 
 local function new(socket, error_handler)
@@ -108,13 +110,13 @@ local function connect_tcp(host, port, error_handler)
   error_handler = error_handler or M.error_handler
 
   -- override the global CQueues error handler briefly, until we have a socket.
-  local old_error_handler = cs.onerror(socket_error_handler)
-  local socket, err_type, err_msg = cs.connect({
+  local old_error_handler = cqueues.socket.onerror(socket_error_handler)
+  local socket, err_type, err_msg = cqueues.socket.connect({
     host = host or '127.0.0.1',
     port = port or '6379',
     nodelay = true,
   })
-  cs.onerror(old_error_handler)
+  cqueues.socket.onerror(old_error_handler)
 
   if not socket then return error_handler(err_type, err_msg) end
 

@@ -1,11 +1,5 @@
 -- Documentation on the redis protocol found at http://redis.io/topics/protocol
-local data_types = {
-  STATUS = 'STATUS',
-  ERROR = 'ERROR',
-  INT = 'INT',
-  STRING = 'STRING',
-  ARRAY = 'ARRAY',
-}
+local response = require'lredis.response'
 
 -- Encode and send a redis command.
 local function send_command(file, arg)
@@ -37,10 +31,8 @@ local function send_command(file, arg)
 end
 
 -- Parse a redis response
-local function read_response(file, response_formatter)
-  response_formatter = response_formatter or function(resp)
-    return resp
-  end
+local function read_response(file, response_creator)
+  response_creator = response_creator or response.new
 
   local line, err_type, err_msg = file:read('*L')
   if not line then
@@ -56,13 +48,13 @@ local function read_response(file, response_formatter)
   end
 
   if data_type == '+' then
-    return response_formatter{ type = data_types.STATUS, data = data }
+    return response_creator(response.STATUS, data)
   elseif data_type == '-' then
-    return response_formatter{ type = data_types.ERROR, data = data }
+    return response_creator(response.ERROR, data)
   elseif data_type == ':' and int_data then
-    return response_formatter{ type = data_types.INT, data = int_data }
+    return response_creator(response.INT, int_data)
   elseif data_type == '$' and int_data == -1 then
-    return response_formatter{ type = data_types.STRING }
+    return response_creator(response.STRING)
   elseif data_type == '$' and int_data >= 0 and int_data <= 512*1024*1024 then
     line, err_type, err_msg = file:read(int_data + 2)
     if not line then
@@ -72,27 +64,24 @@ local function read_response(file, response_formatter)
     if ending ~= '\r\n' then
       return nil, 'PROTOCOL', 'invalid line ending'
     end
-    return response_formatter{ type = data_types.STRING, data = data }
+    return response_creator(response.STRING, data)
   elseif data_type == '*' and int_data == -1 then
-    return response_formatter{ type = data_types.ARRAY }
+    return response_creator(response.ARRAY)
   elseif data_type == '*' and int_data >= 0 then
-    local array = { type = data_types.ARRAY, data = {} }
+    local data = {}
     for i = 1, int_data do
-      array.data[i], err_type, err_msg = read_response(file, response_formatter)
-      if not array.data[i] then
+      data[i], err_type, err_msg = read_response(file, response_creator)
+      if not data[i] then
         return nil, err_type, err_msg
       end
     end
-    return array
+    return response_creator(response.ARRAY, data)
   end
 
   return nil, 'PROTOCOL', 'invalid response'
 end
 
-return setmetatable({
+return {
   send_command = send_command,
   read_response = read_response,
-},
-{
-  __index = data_types
-})
+}
