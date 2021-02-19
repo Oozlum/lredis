@@ -44,7 +44,7 @@ local function read_response(file, response_formatter)
 
   local line, err_type, err_msg = file:read('*L')
   if not line then
-    return nil, err_type, err_msg
+    return nil, err_type or 'SOCKET', err_msg or 'EOF'
   end
 
   -- split the string into its component parts and validate.

@@ -7,6 +7,7 @@ local cc = require 'cqueues.condition'
 
 local function close_client(client)
   client.socket:close()
+  client.socket = false
 end
 
 -- if a whitelist is given, only accept commands in the whitelist.
@@ -37,6 +38,12 @@ local function redis_pcall(client, ...)
     return nil, 'USAGE', 'no arguments given'
   elseif not validate_command(options, args[1]) then
     return nil, 'USAGE', ('command "%s" not permitted at this time'):format(args[1])
+  end
+
+  if client.socket == false then
+    return nil, 'USAGE', 'socket already closed'
+  elseif not client.socket then
+    return nil, 'USAGE', 'invalid socket'
   end
 
   local cond = cc.new()
