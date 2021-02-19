@@ -122,12 +122,16 @@ local transaction_handler_spec = {
         return nil, 'USAGE', 'transaction no longer valid'
       end
       -- override the response creator so we can reliably detect errors.
-      state.response_creator = options.response_creator
+      local orig_response_creator = options.response_creator or
+        xact.attrs.redis_client.response_creator or
+        response.new or
+        function (resp) return resp end
+
       options.response_creator = function(type, data)
-        return {
-          type = type,
-          data = data
-        }
+        if state.error == nil then
+          state.error = (type == response.ERROR)
+        end
+        return orig_response_creator(type, data)
       end
       return true
     end
@@ -148,16 +152,10 @@ local transaction_handler_spec = {
     end,
     -- cancel the transaction on any error.
     ['*'] = function(xact, state, options, args, resp, err_type, err_msg)
-      if not resp or resp.type == response.ERROR then
+      if not resp or state.error then
         cancel_transaction(xact)
       end
-      -- recreate the response as originally requested.
-      options.response_creator = state.response_creator or
-        xact.attrs.redis_client.response_creator or
-        response.new or
-        function (resp) return resp end
-
-      return options.response_creator(resp.type, resp.data), err_type, err_msg
+      return resp, err_type, err_msg
     end,
   },
 }
