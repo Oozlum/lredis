@@ -40,7 +40,7 @@ local function read_response(file, response_creator)
   end
 
   -- split the string into its component parts and validate.
-  local data_type, data, ending = line:sub(1, 1), line:sub(2, -2), line:sub(-2)
+  local data_type, data, ending = line:sub(1, 1), line:sub(2, -3), line:sub(-2)
   local int_data = tonumber(data, 10)
 
   if ending ~= '\r\n' then
@@ -60,7 +60,7 @@ local function read_response(file, response_creator)
     if not line then
       return nil, err_type, err_msg
     end
-    data, ending = line:sub(1, -2), line:sub(-2)
+    data, ending = line:sub(1, -3), line:sub(-2)
     if ending ~= '\r\n' then
       return nil, 'PROTOCOL', 'invalid line ending'
     end
