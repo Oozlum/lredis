@@ -99,6 +99,27 @@ local function redis_call(client, ...)
   return resp
 end
 
+-- read the next publication to our subscribed channels.
+local function redis_next_publication(client, options)
+  options = options or {}
+  local resp, err_type, err_msg = protocol.read_response({
+    read = function(self, format)
+      return client.socket:xread(format, nil, options.timeout)
+    end})
+  if not resp then
+    if err_type == 'SOCKET' and err_msg:sub(1, 9) == 'ETIMEDOUT' then
+      resp = {
+        type = response.ARRAY
+      }
+    else
+      return handle_error(client, options.error_handler, err_type, err_msg)
+    end
+  end
+
+  local renderer = options.response_renderer or client.response_renderer or M.response_renderer or response.new
+  return renderer('MESSAGE', options, {}, resp.type, resp.data)
+end
+
 --[[ Static module functions --]]
 
 -- override the default socket handler so that it returns all errors rather than
@@ -117,7 +138,8 @@ local function new(socket, error_handler)
     fifo = {},
     close = close_client,
     pcall = redis_pcall,
-    call = redis_call
+    call = redis_call,
+    next_publication = redis_next_publication,
   }
 end
 
@@ -144,24 +166,6 @@ M.new = new
 M.connect = connect_tcp
 M.error_handler = function(err_type, err_msg)
   error(('%s %s'):format(tostring(err_type), tostring(err_msg)), 2)
-end
-
--- need locking around sending subscribe, as you won't know
-function start_subscription_modet(arg)
-  if self.in_transaction then -- in a transaction
-    -- read off "QUEUED"
-    local resp = self:pcallt(arg)
-  else
-    local ok, err_code = protocol.send_command(self.socket, arg)
-    if not ok then
-      return M.error_handler(('send_command error: %s'):format(tostring(err_code)))
-    end
-  end
-  self.subscribes_pending = self.subscribes_pending + 1
-end
-
-function start_subscription_mode(...)
-  return self:start_subscription_modet(pack(...))
 end
 
 return M

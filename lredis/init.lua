@@ -34,7 +34,7 @@ local function internal_response_renderer(cmd, options, args, type, data)
 end
 
 local function internal_error_handler(...)
-  return ...
+  return nil, ...
 end
 
 -- return a handler object with an index function which transforms handler.foo into
@@ -47,6 +47,7 @@ local function new_handler(redis_client, handler_spec)
   handler_spec.blacklist = handler_spec.blacklist or {}
   handler_spec.precall = handler_spec.precall or {}
   handler_spec.postcall = handler_spec.postcall or {}
+  handler_spec.methods = handler_spec.methods or {}
 
   local handler = {
     attrs = {
@@ -154,6 +155,10 @@ local function new_handler(redis_client, handler_spec)
       -- ignore non-string keys, otherwise ipairs will go loopy.
       if type(cmd) ~= 'string' then
         return nil
+      end
+
+      if handler_spec.methods[cmd] then
+        return handler_spec.methods[cmd]
       end
 
       if not cache[cmd] then
@@ -419,6 +424,23 @@ local command_handler_spec = {
         handler.attrs.subscribed = nil
       end
       return resp, err_type, err_msg
+    end
+  },
+
+  methods = {
+    next_publication = function(handler, options)
+      if not handler.attrs.subscribed then
+        return nil, 'USAGE', 'Not subscribed'
+      end
+      local resp, err_type, err_msg = handler.attrs.redis_client:next_publication({
+        error_handler = internal_error_handler,
+        response_renderer = internal_response_renderer,
+        timeout = options.timeout,
+      })
+      if not resp then
+        return handle_error(handler, options.error_handler, err_type, err_msg)
+      end
+      return render_response(handler, 'MESSAGE', options, {}, resp.type, resp.data)
     end
   },
 }
