@@ -7,10 +7,11 @@ return {
   STRING = 'STRING',
   ARRAY = 'ARRAY',
 
-  new = function(type, data)
+  new = function(cmd, options, args, response_type, response_data)
+    print(('%s renderer: %s %s'):format(cmd, response_type, tostring(response_data)))
     return {
-      type = type,
-      data = data
+      type = response_type,
+      data = response_data
     }
   end
 }

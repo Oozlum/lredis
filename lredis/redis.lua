@@ -1,11 +1,22 @@
 local protocol = require 'lredis.protocol'
+local response = require 'lredis.response'
 local util = require 'lredis.util'
 local cqueues = require'cqueues'
 cqueues.socket = require'cqueues.socket'
 cqueues.condition = require'cqueues.condition'
 cqueues.errno = require'cqueues.errno'
 
---[[ Base client functions --]]
+local M = {}
+
+-- find the appropriate error handler and call it, returning the result.
+local function handle_error(client, error_handler, err_type, err_msg)
+  error_handler = error_handler or (client or {}).error_handler or M.error_handler
+  if error_handler then
+    return error_handler(err_type, err_msg)
+  end
+
+  return nil, err_type, err_msg
+end
 
 local function close_client(client)
   client.socket:close()
@@ -15,8 +26,6 @@ end
 -- if a whitelist is given, only accept commands in the whitelist.
 -- if a blacklist is given, reject commands that are in it.
 local function validate_command(options, command)
-  command = tostring(command):upper()
-
   if options.whitelist then
     for _,v in ipairs(options.whitelist) do
       if tostring(v):upper() == command then return true end
@@ -38,7 +47,10 @@ local function redis_pcall(client, ...)
 
   if #args == 0 then
     return nil, 'USAGE', 'no arguments given'
-  elseif not validate_command(options, args[1]) then
+  end
+
+  args[1] = tostring(args[1]):upper()
+  if not validate_command(options, args[1]) then
     return nil, 'USAGE', ('command "%s" not permitted at this time'):format(args[1])
   end
 
@@ -58,33 +70,36 @@ local function redis_pcall(client, ...)
     cond:wait()
   end
   -- read the response, signal the next command in the queue and then deal with errors.
-  local resp, err_type, err_msg = protocol.read_response(client.socket, options.response_creator or client.response_creator)
+  local resp, err_type, err_msg = protocol.read_response(client.socket)
   table.remove(client.fifo, 1)
   if client.fifo[1] then
     client.fifo[1]:signal()
   end
-  if not resp then return nil, err_type, err_msg end
 
-  return resp
+  if resp then
+    local renderer = options.response_renderer or client.response_renderer or M.response_renderer or response.new
+    local cmd = table.remove(args, 1)
+
+    return renderer(cmd, options, args, resp.type, resp.data)
+  end
+
+  return nil, err_type, err_msg
 end
 
 -- call the redis function and return the response.
 -- call the registered error handler on error and return the results.
 local function redis_call(client, ...)
   local options, args = util.transform_variadic_args_to_tables(...)
-  options.error_handler = options.error_handler or client.error_handler
 
   local resp, err_type, err_msg = client:pcall(options, args)
   if not resp then
-    return options.error_handler(err_type, err_msg)
+    return handle_error(client, options.error_handler, err_type, err_msg)
   end
 
   return resp
 end
 
 --[[ Static module functions --]]
-
-local M = {}
 
 -- override the default socket handler so that it returns all errors rather than
 -- throwing them.
@@ -98,7 +113,7 @@ local function new(socket, error_handler)
   socket:setvbuf('full', math.huge) -- 'infinite' buffering; no write locks needed
   return {
     socket = socket,
-    error_handler = error_handler or M.error_handler,
+    error_handler = error_handler,
     fifo = {},
     close = close_client,
     pcall = redis_pcall,
@@ -107,8 +122,6 @@ local function new(socket, error_handler)
 end
 
 local function connect_tcp(host, port, error_handler)
-  error_handler = error_handler or M.error_handler
-
   -- override the global CQueues error handler briefly, until we have a socket.
   local old_error_handler = cqueues.socket.onerror(socket_error_handler)
   local socket, err_type, err_msg = cqueues.socket.connect({
@@ -118,17 +131,17 @@ local function connect_tcp(host, port, error_handler)
   })
   cqueues.socket.onerror(old_error_handler)
 
-  if not socket then return error_handler(err_type, err_msg) end
+  if not socket then return handle_error(nil, error_handler, err_type, err_msg) end
 
   socket:onerror(socket_error_handler)
   local ok, err_type, err_msg = socket:connect()
-  if not ok then return error_handler(err_type, err_msg) end
+  if not ok then return handle_error(nil, error_handler, err_type, err_msg) end
 
   return new(socket, error_handler)
 end
 
 M.new = new
-M.connect_tcp = connect_tcp
+M.connect = connect_tcp
 M.error_handler = function(err_type, err_msg)
   error(('%s %s'):format(tostring(err_type), tostring(err_msg)), 2)
 end

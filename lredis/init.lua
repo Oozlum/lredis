@@ -5,7 +5,37 @@ local redis = require'lredis.redis'
 local util = require'lredis.util'
 local response = require'lredis.response'
 
+local M = {}
+local command_renderers = {}
+
+-- find the appropriate error handler and call it, returning the result.
+local function handle_error(handler, error_handler, err_type, err_msg)
+  error_handler = error_handler or (handler or {attrs={}}).attrs.error_handler or M.error_handler
+  if error_handler then
+    return error_handler(err_type, err_msg)
+  end
+
+  return nil, err_type, err_msg
+end
+
+-- find the appropriate response renderer and call it, returning the result.
+local function render_response(handler, cmd, options, args, type, data)
+  response_renderer = options.response_renderer or (handler or {attrs={}}).attrs.response_renderer or response.new
+  return response_renderer(cmd, options, args, type, data)
+end
+
 --[[ Base command handler --]]
+
+local function internal_response_renderer(cmd, options, args, type, data)
+  return {
+    type = type,
+    data = data
+  }
+end
+
+local function internal_error_handler(...)
+  return ...
+end
 
 -- return a handler object with an index function which transforms handler.foo into
 -- handler.call('foo', ...), caching all created functions.
@@ -28,57 +58,91 @@ local function new_handler(redis_client, handler_spec)
       end
     end,
     call = function(handler, ...)
-      if not handler.attrs.redis_client then
-        return nil, 'USAGE', 'invalid redis client.  Was it closed?'
+      local user_options, args = util.transform_variadic_args_to_tables(...)
+      if #args == 0 then
+        return handle_error(handler, options.error_handler, 'USAGE', 'No command given')
       end
+      local cmd = tostring(table.remove(args, 1)):upper()
 
-      local options, args = util.transform_variadic_args_to_tables(...)
+      if not handler.attrs.redis_client then
+        return handle_error(handler, user_options.error_handler, 'USAGE', 'invalid redis client.  Was it closed?')
+      end
 
       -- duplicate the options table so we can add things without upsetting the caller
       -- then inject the handler white and black lists.
-      local new_options = util.deep_copy(options)
-      new_options.blacklist = new_options.blacklist or {}
+      local options = {
+        user_options = util.deep_copy(user_options),
+        blacklist = util.deep_copy(user_options.blacklist or {}),
+        whitelist = (user_options.whitelist and util.deep_copy(user_options.whitelist)) or nil,
+        callback = user_options.callback,
+      }
 
       -- create a state object for use by the hooks.
       local state = {}
 
       -- call the pre-call hook if present.
-      local cmd = tostring(args[1] or ''):upper()
       local resp, err_type, err_msg = true, nil, nil
-      if handler_spec.precall['*'] then
-        resp, err_type, err_msg = handler_spec.precall['*'](handler, state, new_options, args)
+      if handler_spec.precall['^'] then
+        resp, err_type, err_msg = handler_spec.precall['^'](handler, state, cmd, options, args)
       end
       if resp and handler_spec.precall[cmd] then
-        resp, err_type, err_msg = handler_spec.precall[cmd](handler, state, new_options, args)
+        resp, err_type, err_msg = handler_spec.precall[cmd](handler, state, cmd, options, args)
+      end
+      if resp and handler_spec.precall['$'] then
+        resp, err_type, err_msg = handler_spec.precall['$'](handler, state, cmd, options, args)
       end
       if not resp then
-        return nil, err_type, err_msg
+        return handle_error(handler, user_options.error_handler, err_type, err_msg)
       end
 
       -- apply the white and blacklists.
       if handler_spec.whitelist then
-        new_options.whitelist = new_options.whitelist or {}
         for _, cmd in ipairs(handler_spec.whitelist) do
-          table.insert(new_options.whitelist, cmd)
+          table.insert(options.whitelist, cmd)
         end
       end
       for _, cmd in ipairs(handler_spec.blacklist) do
-        table.insert(new_options.blacklist, cmd)
+        table.insert(options.blacklist, cmd)
       end
+
+      -- make the call using our own error handler and renderer.
+      local resp, err_type, err_msg = handler.attrs.redis_client:pcall(cmd, {
+        error_handler = internal_error_handler,
+        response_renderer = internal_response_renderer,
+        blacklist = options.blacklist,
+        whitelist = options.whitelist,
+      }, args)
 
       -- call the post-call hook with the results of the actual call
-      local resp, err_type, err_msg = handler.attrs.redis_client:pcall(new_options, args)
-      if handler_spec.postcall[cmd] then
-        resp, err_type, err_msg = handler_spec.postcall[cmd](handler, state, new_options, args, resp, err_type, err_msg)
+      if handler_spec.postcall['^'] then
+        resp, err_type, err_msg = handler_spec.postcall['^'](handler, state, cmd, options, args, resp, err_type, err_msg)
       end
-      if handler_spec.postcall['*'] then
-        resp, err_type, err_msg = handler_spec.postcall['*'](handler, state, new_options, args, resp, err_type, err_msg)
+      if handler_spec.postcall[cmd] then
+        resp, err_type, err_msg = handler_spec.postcall[cmd](handler, state, cmd, options, args, resp, err_type, err_msg)
+      end
+      if handler_spec.postcall['$'] then
+        resp, err_type, err_msg = handler_spec.postcall['$'](handler, state, cmd, options, args, resp, err_type, err_msg)
       end
 
-      -- handle any errors and return.
+      -- if there was an error, report it using the original error handler.
       if not resp then
-        local error_handler = new_options.error_handler or handler.attrs.redis_client.error_handler
-        return error_handler(err_type, err_msg)
+        return handle_error(handler, user_options.error_handler, err_type, err_msg)
+      end
+
+      -- some commands return special objects that cannot be rendered.
+      if resp.do_not_render then
+        resp = resp.data
+      else
+        -- do any command-specific rendering, then run the user supplied renderer
+        if command_renderers[cmd] then
+          resp = command_renderers[cmd](handler, state, cmd, options, args, resp.type, resp.data)
+        end
+        resp = render_response(handler, cmd, user_options, args, resp.type, resp.data)
+      end
+
+      -- finally call the callback and return the response
+      if options.callback then
+        options.callback(cmd, user_options, args, resp)
       end
 
       return resp
@@ -103,6 +167,72 @@ local function new_handler(redis_client, handler_spec)
   })
 end
 
+--[[ command-specific response renderers --]]
+function command_renderers.HGETALL(handler, state, cmd, options, args, type, data)
+  if data and type == response.ARRAY then
+    repeat
+      local name = table.remove(data, 1)
+      local value = table.remove(data, 1)
+      if name then
+        data[name.data] = value
+      end
+    until name == nil
+  end
+  return {
+    type = type,
+    data = data
+  }
+end
+
+function command_renderers.HMGET(handler, state, cmd, options, args, type, data)
+  if data and type == response.ARRAY then
+    for i = 2,#args do
+      data[args[i]] = data[i - 1]
+      data[i - 1] = nil
+    end
+  end
+  return {
+    type = type,
+    data = data
+  }
+end
+
+function command_renderers.EXEC(handler, state, cmd, options, args, type, data)
+  if data and type == response.ARRAY then
+    -- call each of the original renderers.
+    for i,_cmd in ipairs(handler.attrs.command_queue or {}) do
+      if command_renderers[_cmd.cmd] then
+        data[i] = command_renderers[_cmd.cmd](handler, _cmd.state, _cmd.cmd, _cmd.options, _cmd.args, data[i].type, data[i].data)
+      end
+    end
+  end
+
+  return {
+    type = type,
+    data = data
+  }
+end
+
+--[[ command-specific handler hooks --]]
+local function hmset_precall(handler, state, cmd, options, args)
+  -- transform { 'hash', { name1 = 'value1', 'name2', 'value2',... } } => { 'hash', 'name1', 'value1', 'name2', 'value2' }
+  local kv = args[2]
+  if type(kv) == 'table' then
+    table.remove(args, 2)
+    for i,v in ipairs(kv) do
+      table.insert(args, tostring(v))
+      kv[i] = nil
+    end
+    for k,v in pairs(kv) do
+      table.insert(args, tostring(k))
+      table.insert(args, tostring(v))
+    end
+  end
+  return true
+end
+
+--[[ Transaction handler --]]
+
 -- set up a transaction handler.
 local function cancel_transaction(xact)
   if xact.attrs.parent.attrs.transaction_lock then
@@ -117,48 +247,62 @@ local transaction_handler_spec = {
     'MULTI'
   },
   precall = {
-    ['*'] = function(xact, state, options, args)
+    ['^'] = function(xact, state, cmd, options, args)
       if not xact.attrs.in_transaction then
         return nil, 'USAGE', 'transaction no longer valid'
       end
-      -- override the response creator so we can reliably detect errors.
-      local orig_response_creator = options.response_creator or
-        xact.attrs.redis_client.response_creator or
-        response.new or
-        function (resp) return resp end
+      return true
+    end,
 
-      options.response_creator = function(type, data)
-        if state.error == nil then
-          state.error = (type == response.ERROR)
-        end
-        return orig_response_creator(type, data)
+    HMSET = hmset_precall,
+
+    ['$'] = function(xact, state, cmd, options, args)
+      -- push the callback and renderer into the transaction so it can be resolved on EXEC.
+      if cmd ~= 'EXEC' and cmd ~= 'DISCARD' and cmd ~= 'RESET' then
+        xact.attrs.command_queue = xact.attrs.command_queue or {}
+        table.insert(xact.attrs.command_queue, {
+          state = state,
+          cmd = cmd,
+          options = options,
+          args = util.deep_copy(args),
+        })
       end
       return true
-    end
+    end,
   },
   postcall = {
     -- cancel the transaction after DISCARD, EXEC and RESET
-    DISCARD = function(xact, state, options, args, resp, err_type, err_msg)
+    DISCARD = function(xact, state, cmd, options, args, resp, err_type, err_msg)
       cancel_transaction(xact)
       return resp, err_type, err_msg
     end,
-    EXEC = function(xact, state, options, args, resp, err_type, err_msg)
+    EXEC = function(xact, state, cmd, options, args, resp, err_type, err_msg)
       cancel_transaction(xact)
+
+      -- call each of the original callbacks.
+      for i,_cmd in ipairs(xact.attrs.command_queue or {}) do
+        if _cmd.options.callback then
+          _cmd.options.callback(_cmd.cmd, _cmd.options.user_options, _cmd.args, resp[i])
+        end
+      end
+
       return resp, err_type, err_msg
     end,
-    RESET = function(xact, state, options, args, resp, err_type, err_msg)
+    RESET = function(xact, state, cmd, options, args, resp, err_type, err_msg)
       cancel_transaction(xact)
       return resp, err_type, err_msg
     end,
     -- cancel the transaction on any error.
-    ['*'] = function(xact, state, options, args, resp, err_type, err_msg)
-      if not resp or state.error then
+    ['$'] = function(xact, state, cmd, options, args, resp, err_type, err_msg)
+      if not resp or resp.type == response.ERROR then
         cancel_transaction(xact)
       end
       return resp, err_type, err_msg
     end,
   },
 }
+
+--[[ Base command handler --]]
 
 -- set up the basic operations of a command handler.
 local command_handler_spec = {
@@ -167,7 +311,7 @@ local command_handler_spec = {
     'DISCARD'
   },
   precall = {
-    ['*'] = function(handler, state, options, args)
+    ['^'] = function(handler, state, cmd, options, args)
       if handler.attrs.transaction_lock and not cqueues.running() then
         return nil, 'USAGE', 'Transaction in progress and cannot wait -- not in a coroutine'
       end
@@ -176,9 +320,12 @@ local command_handler_spec = {
       end
       return true
     end,
+
+    HMSET = hmset_precall,
+
     -- create a transaction lock now to prevent other coroutines from pipelining
     -- commands while MULTI is pending.
-    MULTI = function(handler, state, options, args)
+    MULTI = function(handler, state, cmd, options, args)
       if handler.attrs.transaction_lock then
         return nil, 'USAGE', 'Unexpected transaction state'
       end
@@ -189,7 +336,7 @@ local command_handler_spec = {
   postcall = {
     -- if the MULTI command finished successfully create and return a transaction
     -- handler.  Otherwise, remove the transaction lock and return an error.
-    MULTI = function(handler, state, options, args, resp, err_type, err_msg)
+    MULTI = function(handler, state, cmd, options, args, resp, err_type, err_msg)
       if not resp or resp.type == response.ERROR then
         cancel_transaction{
           attrs = {
@@ -207,20 +354,26 @@ local command_handler_spec = {
       local transaction = new_handler(handler.attrs.redis_client, transaction_handler_spec)
       transaction.attrs.parent = handler
       transaction.attrs.in_transaction = true
-      return transaction
+      return {
+        do_not_render = true,
+        data = transaction
+      }
     end
   },
 }
 
-return {
-  new = function(redis_client)
-    return new_handler(redis_client, command_handler_spec)
-  end,
-  connect = function(host, port, error_handler)
-    local redis_client, err_type, err_msg = redis.connect_tcp(host, port, error_handler)
-    if not redis_client then
-      return nil, err_type, err_msg
-    end
-    return new_handler(redis_client, command_handler_spec)
-  end,
-}
+M.new = function(redis_client)
+  return new_handler(redis_client, command_handler_spec)
+end
+M.connect = function(host, port, error_handler)
+  local redis_client, err_type, err_msg = redis.connect(host, port, error_handler)
+  if not redis_client then
+    return nil, err_type, err_msg
+  end
+  return new_handler(redis_client, command_handler_spec)
+end
+M.error_handler = function(err_type, err_msg)
+  error(('%s %s'):format(tostring(err_type), tostring(err_msg)), 2)
+end
+
+return M

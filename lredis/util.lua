@@ -55,7 +55,23 @@ local function deep_copy(t)
   return cache[t]
 end
 
+local function dump(val, key, indent)
+  indent = indent or ''
+  key = key or ''
+
+  if type(val) == 'table' then
+    print(('%s%s = {'):format(indent, key))
+    for k,v in pairs(val) do
+      dump(v, k, indent .. '  ')
+    end
+    print(('%s}'):format(indent))
+  else
+    print(('%s%s = %s'):format(indent, key, tostring(val)))
+  end
+end
+
 return {
   transform_variadic_args_to_tables = transform_variadic_args_to_tables,
   deep_copy = deep_copy,
+  dump = dump,
 }

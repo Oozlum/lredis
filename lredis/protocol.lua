@@ -1,6 +1,5 @@
 -- Documentation on the redis protocol found at http://redis.io/topics/protocol
-local response = require'lredis.response'
-
+--
 -- Encode and send a redis command.
 local function send_command(file, arg)
   if #arg == 0 then
@@ -30,10 +29,15 @@ local function send_command(file, arg)
   return true
 end
 
--- Parse a redis response
-local function read_response(file, response_creator)
-  response_creator = response_creator or response.new
+local function response_renderer(type, data)
+  return {
+    type = type,
+    data = data
+  }
+end
 
+-- Parse a redis response
+local function read_response(file)
   local line, err_type, err_msg = file:read('*L')
   if not line then
     return nil, err_type or 'SOCKET', err_msg or 'EOF'
@@ -48,13 +52,13 @@ local function read_response(file, response_creator)
   end
 
   if data_type == '+' then
-    return response_creator(response.STATUS, data)
+    return response_renderer(response.STATUS, data)
   elseif data_type == '-' then
-    return response_creator(response.ERROR, data)
+    return response_renderer(response.ERROR, data)
   elseif data_type == ':' and int_data then
-    return response_creator(response.INT, int_data)
+    return response_renderer(response.INT, int_data)
   elseif data_type == '$' and int_data == -1 then
-    return response_creator(response.STRING)
+    return response_renderer(response.STRING)
   elseif data_type == '$' and int_data >= 0 and int_data <= 512*1024*1024 then
     line, err_type, err_msg = file:read(int_data + 2)
     if not line then
@@ -64,18 +68,18 @@ local function read_response(file, response_creator)
     if ending ~= '\r\n' then
       return nil, 'PROTOCOL', 'invalid line ending'
     end
-    return response_creator(response.STRING, data)
+    return response_renderer(response.STRING, data)
   elseif data_type == '*' and int_data == -1 then
-    return response_creator(response.ARRAY)
+    return response_renderer(response.ARRAY)
   elseif data_type == '*' and int_data >= 0 then
     local data = {}
     for i = 1, int_data do
-      data[i], err_type, err_msg = read_response(file, response_creator)
+      data[i], err_type, err_msg = read_response(file)
       if not data[i] then
         return nil, err_type, err_msg
       end
     end
-    return response_creator(response.ARRAY, data)
+    return response_renderer(response.ARRAY, data)
   end
 
   return nil, 'PROTOCOL', 'invalid response'
