@@ -77,6 +77,16 @@ local function new_handler(redis_client, handler_spec)
         callback = user_options.callback,
       }
 
+      -- apply the white and blacklists.
+      if handler_spec.whitelist then
+        for _, cmd in ipairs(handler_spec.whitelist) do
+          table.insert(options.whitelist, cmd)
+        end
+      end
+      for _, cmd in ipairs(handler_spec.blacklist) do
+        table.insert(options.blacklist, cmd)
+      end
+
       -- create a state object for use by the hooks.
       local state = {}
 
@@ -93,16 +103,6 @@ local function new_handler(redis_client, handler_spec)
       end
       if not resp then
         return handle_error(handler, user_options.error_handler, err_type, err_msg)
-      end
-
-      -- apply the white and blacklists.
-      if handler_spec.whitelist then
-        for _, cmd in ipairs(handler_spec.whitelist) do
-          table.insert(options.whitelist, cmd)
-        end
-      end
-      for _, cmd in ipairs(handler_spec.blacklist) do
-        table.insert(options.blacklist, cmd)
       end
 
       -- make the call using our own error handler and renderer.
@@ -251,6 +251,19 @@ local transaction_handler_spec = {
       if not xact.attrs.in_transaction then
         return nil, 'USAGE', 'transaction no longer valid'
       end
+      -- override the whitelist if we're subscribed.
+      if xact.attrs.subscribed then
+        options.whitelist = {
+          'SUBSCRIBE',
+          'PSUBSCRIBE',
+          'UNSUBSCRIBE',
+          'PUNSUBSCRIBE',
+          'RESET',
+          'QUIT',
+          'EXEC',
+          'DISCARD',
+        }
+      end
       return true
     end,
 
@@ -271,6 +284,16 @@ local transaction_handler_spec = {
     end,
   },
   postcall = {
+    -- enter subscription mode for the subscribe commands
+    SUBSCRIBE = function(xact, state, cmd, options, args, resp, err_type, err_msg)
+      xact.attrs.subscribed = true
+      return resp, err_type, err_msg
+    end,
+    PSUBSCRIBE = function(xact, state, cmd, options, args, resp, err_type, err_msg)
+      xact.attrs.subscribed = true
+      return resp, err_type, err_msg
+    end,
+
     -- cancel the transaction after DISCARD, EXEC and RESET
     DISCARD = function(xact, state, cmd, options, args, resp, err_type, err_msg)
       cancel_transaction(xact)
@@ -279,10 +302,17 @@ local transaction_handler_spec = {
     EXEC = function(xact, state, cmd, options, args, resp, err_type, err_msg)
       cancel_transaction(xact)
 
-      -- call each of the original callbacks.
-      for i,_cmd in ipairs(xact.attrs.command_queue or {}) do
-        if _cmd.options.callback then
-          _cmd.options.callback(_cmd.cmd, _cmd.options.user_options, _cmd.args, resp[i])
+      if resp and resp.type ~= response.ERROR then
+        -- propagate the subscription state to the parent.
+        xact.attrs.parent.attrs.subscribed = xact.attrs.subscribed
+
+        if resp.type == response.ARRAY then
+          -- call each of the original callbacks.
+          for i,_cmd in ipairs(xact.attrs.command_queue or {}) do
+            if _cmd.options.callback then
+              _cmd.options.callback(_cmd.cmd, _cmd.options.user_options, _cmd.args, resp.data[i])
+            end
+          end
         end
       end
 
@@ -317,6 +347,17 @@ local command_handler_spec = {
       end
       while handler.attrs.transaction_lock do
         handler.attrs.transaction_lock:wait()
+      end
+      -- override the whitelist if we're subscribed.
+      if handler.attrs.subscribed then
+        options.whitelist = {
+          'SUBSCRIBE',
+          'PSUBSCRIBE',
+          'UNSUBSCRIBE',
+          'PUNSUBSCRIBE',
+          'RESET',
+          'QUIT',
+        }
       end
       return true
     end,
@@ -358,6 +399,26 @@ local command_handler_spec = {
         do_not_render = true,
         data = transaction
       }
+    end,
+
+    SUBSCRIBE = function(handler, state, cmd, options, args, resp, err_type, err_msg)
+      if resp and resp.type ~= response.ERROR then
+        handler.attrs.subscribed = true
+      end
+      return resp, err_type, err_msg
+    end,
+    PSUBSCRIBE = function(handler, state, cmd, options, args, resp, err_type, err_msg)
+      if resp and resp.type ~= response.ERROR then
+        handler.attrs.subscribed = true
+      end
+      return resp, err_type, err_msg
+    end,
+
+    RESET = function(handler, state, cmd, options, args, resp, err_type, err_msg)
+      if resp and resp.type ~= response.ERROR then
+        handler.attrs.subscribed = nil
+      end
+      return resp, err_type, err_msg
     end
   },
 }
